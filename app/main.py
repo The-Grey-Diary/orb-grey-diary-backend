@@ -16,13 +16,35 @@ from app.middleware.rate_limit import RateLimitMiddleware
 from app.tasks.scheduler import start_scheduler
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown events."""
-    await init_db()
-    scheduler = start_scheduler()
+    """Startup and shutdown events with explicit live logging."""
+    print("🚀 [LIFESPAN] Starting up container... Preparing to initialize Database.", flush=True)
+    
+    try:
+        await init_db()
+        print("✅ [LIFESPAN] Database initialized successfully.", flush=True)
+    except Exception as e:
+        print(f"❌ [LIFESPAN] Critical failure during init_db: {e}", flush=True)
+        raise e
+
+    print("⏰ [LIFESPAN] Attempting to start background scheduler...", flush=True)
+    try:
+        scheduler = start_scheduler()
+        print("✅ [LIFESPAN] Scheduler configured. Reaching yield statement now!", flush=True)
+    except Exception as e:
+        print(f"❌ [LIFESPAN] Critical failure during start_scheduler: {e}", flush=True)
+        raise e
+
     yield
-    scheduler.shutdown()
+
+    print("🛑 [LIFESPAN] Shutting down container... Closing scheduler.", flush=True)
+    try:
+        scheduler.shutdown()
+        print("✅ [LIFESPAN] Scheduler closed safely.", flush=True)
+    except Exception as e:
+        print(f"❌ [LIFESPAN] Error during scheduler shutdown: {e}", flush=True)
 
 
 # Sentry setup
