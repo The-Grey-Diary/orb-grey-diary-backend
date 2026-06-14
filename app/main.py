@@ -1,51 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.core.database import init_db
 from app.routers import auth, users, capsules, echoes, court, guardian, payments, notifications, tasks
-from app.middleware.rate_limit import RateLimitMiddleware
-from app.tasks.scheduler import start_scheduler
-
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup and shutdown events with explicit live logging."""
-    print("🚀 [LIFESPAN] Starting up container... Preparing to initialize Database.", flush=True)
-    
-    try:
-        await init_db()
-        print("✅ [LIFESPAN] Database initialized successfully.", flush=True)
-    except Exception as e:
-        print(f"❌ [LIFESPAN] Critical failure during init_db: {e}", flush=True)
-        raise e
-
-    print("⏰ [LIFESPAN] Attempting to start background scheduler...", flush=True)
-    try:
-        scheduler = start_scheduler()
-        print("✅ [LIFESPAN] Scheduler configured. Reaching yield statement now!", flush=True)
-    except Exception as e:
-        print(f"❌ [LIFESPAN] Critical failure during start_scheduler: {e}", flush=True)
-        raise e
-
-    yield
-
-    print("🛑 [LIFESPAN] Shutting down container... Closing scheduler.", flush=True)
-    try:
-        scheduler.shutdown()
-        print("✅ [LIFESPAN] Scheduler closed safely.", flush=True)
-    except Exception as e:
-        print(f"❌ [LIFESPAN] Error during scheduler shutdown: {e}", flush=True)
-
-
-# Sentry setup
-if settings.SENTRY_DSN:
-    sentry_sdk.init(
-        dsn=settings.SENTRY_DSN,
-        integrations=[FastApiIntegration()],
-        traces_sample_rate=0.1,
-        environment=settings.APP_ENV,
-    )
 
 app = FastAPI(
     title="The Grey Diary API",
