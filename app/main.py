@@ -40,12 +40,16 @@ app.include_router(tasks.router,                                  tags=["Tasks"]
 async def health_check():
     return {
         "status": "ok",
-        "service": "grey-diary-api",
+        "service": "the-grey-diary-api",
         "env": settings.APP_ENV,
         "supabase_configured": bool(settings.SUPABASE_URL),
     }
 
 
+
 @app.get("/")
 async def root():
-    return {"message": "The Grey Diary API", "docs": "/docs"}
+    return {
+        "message": "The Grey Diary API is LIVE, Health : /health", 
+        "docs": "/docs" if settings.APP_ENV != "production" else "Disabled in production"
+    }
