@@ -1,209 +1,243 @@
-"""Capsules router — create, seal, reveal, explore."""
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from typing import Optional
-from uuid import UUID
+from datetime import datetime, timezone
+import pytz
 
 from app.core.auth import get_current_user, optional_user
-from app.schemas.capsule import (
-    CapsuleCreate, CapsuleUpdate, CapsuleOut,
-    CapsuleSeal, CapsuleListOut, CapsuleStats
-)
-from app.services.capsule_service import CapsuleService
-from app.services.observer_service import ObserverService
-from app.core.database import get_db
+from app.core.database import get_supabase
+from app.schemas.capsule import CapsuleCreate, CapsuleUpdate, CapsuleSeal, CapsuleStats
 
 router = APIRouter()
+IST = pytz.timezone("Asia/Kolkata")
+
+PLAN_LIMITS = {"free": 3, "plus": 25, "premium": 9999}
 
 
-@router.post("/", response_model=CapsuleOut, status_code=201)
-async def create_capsule(
-    payload: CapsuleCreate,
-    background_tasks: BackgroundTasks,
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+@router.get("/stats", response_model=CapsuleStats)
+async def community_stats():
+    db = get_supabase()
+    if not db:
+        return CapsuleStats()
+    try:
+        sealed = db.table("capsules").select("id", count="exact")             .eq("status", "sealed").execute()
+        revealed = db.table("capsules").select("id", count="exact")             .eq("status", "revealed").execute()
+        users = db.table("users").select("id", count="exact").execute()
+        tonight = db.table("capsules").select("id", count="exact")             .eq("status", "sealed")             .lte("reveal_date", datetime.now(IST).strftime("%Y-%m-%dT23:59:59"))             .execute()
+        return CapsuleStats(
+            total_sealed=sealed.count or 0,
+            total_revealed=revealed.count or 0,
+            total_users=users.count or 0,
+            revealing_tonight=tonight.count or 0,
+        )
+    except Exception:
+        return CapsuleStats()
+
+
+@router.get("/mine")
+async def my_capsules(
+    page: int = Query(1, ge=1),
+    status: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Create a new capsule (draft or sealed)."""
-    service = CapsuleService(db)
-
-    # Check plan limits
-    active_count = await service.count_active(current_user.id)
-    limits = {"free": 3, "plus": 25, "premium": 999}
-    limit = limits.get(current_user.plan, 3)
-
-    if active_count >= limit:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Plan limit reached. Upgrade to seal more capsules."
-        )
-
-    capsule = await service.create(current_user.id, payload)
-
-    # If sealing immediately, trigger Observer AI in background
-    if payload.status == "sealed":
-        background_tasks.add_task(
-            ObserverService.generate_reflection,
-            capsule_id=capsule.id,
-            content=capsule.content,
-            mood=capsule.mood,
-            category=capsule.category,
-        )
-
-    return capsule
+    db = get_supabase()
+    if not db:
+        return {"items": [], "total": 0, "page": page, "per_page": 20, "has_more": False}
+    q = db.table("capsules").select("*").eq("user_id", current_user["sub"])
+    if status:
+        q = q.eq("status", status)
+    result = q.order("created_at", desc=True).range((page-1)*20, page*20-1).execute()
+    return {"items": result.data or [], "total": len(result.data or []),
+            "page": page, "per_page": 20, "has_more": len(result.data or []) == 20}
 
 
-@router.get("/", response_model=CapsuleListOut)
+@router.get("/")
 async def explore_capsules(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=50),
     category: Optional[str] = None,
     mood: Optional[str] = None,
-    sort: str = Query("recent", regex="^(recent|reactions|discussed)$"),
-    db=Depends(get_db),
-    current_user=Depends(optional_user),
+    sort: str = Query("recent"),
+    current_user: Optional[dict] = Depends(optional_user),
 ):
-    """Explore public revealed capsules."""
-    service = CapsuleService(db)
-    return await service.list_public(
-        page=page, per_page=per_page,
-        category=category, mood=mood, sort=sort,
-        viewer_id=current_user.id if current_user else None,
-    )
+    db = get_supabase()
+    if not db:
+        return {"items": [], "total": 0, "page": page, "per_page": per_page, "has_more": False}
+    q = db.table("capsules").select(
+        "*, users(display_name, avatar_style)"
+    ).eq("status", "revealed").eq("is_public", True)
+    if category:
+        q = q.eq("category", category)
+    if mood:
+        q = q.eq("mood", mood)
+    q = q.order("revealed_at", desc=True)
+    result = q.range((page-1)*per_page, page*per_page-1).execute()
+    items = result.data or []
+    return {"items": items, "total": len(items), "page": page,
+            "per_page": per_page, "has_more": len(items) == per_page}
 
 
-@router.get("/stats", response_model=CapsuleStats)
-async def community_stats(db=Depends(get_db)):
-    """Community pulse — counts, mood distribution, recent activity."""
-    service = CapsuleService(db)
-    return await service.get_community_stats()
-
-
-@router.get("/mine", response_model=CapsuleListOut)
-async def my_capsules(
-    page: int = Query(1, ge=1),
-    status: Optional[str] = None,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+@router.post("/", status_code=201)
+async def create_capsule(
+    payload: CapsuleCreate,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get the current user's own capsules."""
-    service = CapsuleService(db)
-    return await service.list_by_user(current_user.id, page=page, status=status)
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
 
+    # Check plan limit
+    user_result = db.table("users").select("plan").eq("id", current_user["sub"]).single().execute()
+    plan = user_result.data.get("plan", "free") if user_result.data else "free"
+    limit = PLAN_LIMITS.get(plan, 3)
+    count_result = db.table("capsules").select("id", count="exact")         .eq("user_id", current_user["sub"]).neq("status", "revealed").execute()
+    if (count_result.count or 0) >= limit:
+        raise HTTPException(status_code=403, detail=f"Plan limit reached. Upgrade to seal more.")
 
-@router.get("/{capsule_id}", response_model=CapsuleOut)
-async def get_capsule(
-    capsule_id: UUID,
-    db=Depends(get_db),
-    current_user=Depends(optional_user),
-):
-    """Get a single capsule. Author sees all states. Public sees only revealed."""
-    service = CapsuleService(db)
-    capsule = await service.get_by_id(capsule_id)
+    data = {
+        "user_id": current_user["sub"],
+        "title": payload.title,
+        "content": payload.content,
+        "category": payload.category,
+        "mood": payload.mood,
+        "reveal_date": payload.reveal_date.isoformat(),
+        "status": payload.status,
+        "is_public": payload.is_public,
+    }
+    if payload.status == "sealed":
+        data["sealed_at"] = datetime.now(timezone.utc).isoformat()
 
-    if not capsule:
-        raise HTTPException(status_code=404, detail="Capsule not found")
+    result = db.table("capsules").insert(data).execute()
+    capsule = result.data[0]
 
-    # Non-revealed capsules only visible to owner
-    if capsule.status != "revealed" and (
-        not current_user or current_user.id != capsule.user_id
-    ):
-        raise HTTPException(status_code=403, detail="This capsule is still sealed")
-
-    await service.increment_view(capsule_id)
+    if payload.status == "sealed":
+        from app.services.observer_service import ObserverService
+        background_tasks.add_task(
+            ObserverService.generate_reflection,
+            capsule_id=capsule["id"],
+            content=capsule["content"],
+            mood=capsule["mood"],
+            category=capsule["category"],
+        )
     return capsule
 
 
-@router.put("/{capsule_id}", response_model=CapsuleOut)
-async def update_capsule(
-    capsule_id: UUID,
-    payload: CapsuleUpdate,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+@router.get("/{capsule_id}")
+async def get_capsule(
+    capsule_id: str,
+    current_user: Optional[dict] = Depends(optional_user),
 ):
-    """Update a capsule. Only allowed in draft state."""
-    service = CapsuleService(db)
-    capsule = await service.get_by_id(capsule_id)
-
-    if not capsule or capsule.user_id != current_user.id:
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    result = db.table("capsules").select("*").eq("id", capsule_id).single().execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="Capsule not found")
+    capsule = result.data
+    if capsule["status"] != "revealed":
+        if not current_user or current_user["sub"] != capsule["user_id"]:
+            raise HTTPException(status_code=403, detail="This capsule is still sealed")
+    # Increment view count
+    db.table("capsules").update({"view_count": capsule["view_count"] + 1})         .eq("id", capsule_id).execute()
+    return capsule
 
-    if capsule.status != "draft":
+
+@router.put("/{capsule_id}")
+async def update_capsule(
+    capsule_id: str,
+    payload: CapsuleUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    result = db.table("capsules").select("*").eq("id", capsule_id).single().execute()
+    if not result.data or result.data["user_id"] != current_user["sub"]:
+        raise HTTPException(status_code=404, detail="Capsule not found")
+    if result.data["status"] != "draft":
         raise HTTPException(status_code=403, detail="Cannot edit a sealed capsule")
-
-    return await service.update(capsule_id, payload)
+    data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    updated = db.table("capsules").update(data).eq("id", capsule_id).execute()
+    return updated.data[0]
 
 
 @router.delete("/{capsule_id}", status_code=204)
 async def delete_capsule(
-    capsule_id: UUID,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+    capsule_id: str,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Delete a capsule. Only allowed in draft state."""
-    service = CapsuleService(db)
-    capsule = await service.get_by_id(capsule_id)
-
-    if not capsule or capsule.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Capsule not found")
-
-    if capsule.status != "draft":
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    result = db.table("capsules").select("status,user_id").eq("id", capsule_id).single().execute()
+    if not result.data or result.data["user_id"] != current_user["sub"]:
+        raise HTTPException(status_code=404, detail="Not found")
+    if result.data["status"] != "draft":
         raise HTTPException(status_code=403, detail="Cannot delete a sealed capsule")
+    db.table("capsules").delete().eq("id", capsule_id).execute()
 
-    await service.delete(capsule_id)
 
-
-@router.post("/{capsule_id}/seal", response_model=CapsuleOut)
+@router.post("/{capsule_id}/seal")
 async def seal_capsule(
-    capsule_id: UUID,
+    capsule_id: str,
     payload: CapsuleSeal,
     background_tasks: BackgroundTasks,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Seal a draft capsule with a reveal date."""
-    service = CapsuleService(db)
-    capsule = await service.get_by_id(capsule_id)
-
-    if not capsule or capsule.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Capsule not found")
-
-    if capsule.status != "draft":
-        raise HTTPException(status_code=403, detail="Capsule is already sealed")
-
-    sealed = await service.seal(capsule_id, payload.reveal_date)
-
-    # Trigger Grey Observer
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    result = db.table("capsules").select("*").eq("id", capsule_id).single().execute()
+    if not result.data or result.data["user_id"] != current_user["sub"]:
+        raise HTTPException(status_code=404, detail="Not found")
+    if result.data["status"] != "draft":
+        raise HTTPException(status_code=403, detail="Already sealed")
+    sealed = db.table("capsules").update({
+        "status": "sealed",
+        "reveal_date": payload.reveal_date.isoformat(),
+        "sealed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", capsule_id).execute()
     background_tasks.add_task(
-        ObserverService.generate_reflection,
+        __import__("app.services.observer_service", fromlist=["ObserverService"])
+        .ObserverService.generate_reflection,
         capsule_id=capsule_id,
-        content=capsule.content,
-        mood=capsule.mood,
-        category=capsule.category,
+        content=result.data["content"],
+        mood=result.data["mood"],
+        category=result.data["category"],
     )
-
-    return sealed
+    return sealed.data[0]
 
 
 @router.post("/{capsule_id}/react")
-async def add_reaction(
-    capsule_id: UUID,
-    reaction_type: str = Query(..., regex="^(heart|heartbreak|fire|candle)$"),
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+async def react(
+    capsule_id: str,
+    reaction_type: str = Query(...),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Add a reaction to a revealed capsule."""
-    service = CapsuleService(db)
-    await service.add_reaction(capsule_id, current_user.id, reaction_type)
+    if reaction_type not in ("heart", "heartbreak", "fire", "candle"):
+        raise HTTPException(status_code=400, detail="Invalid reaction type")
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        db.table("reactions").insert({
+            "capsule_id": capsule_id,
+            "user_id": current_user["sub"],
+            "type": reaction_type,
+        }).execute()
+    except Exception:
+        pass  # duplicate reaction ignored
     return {"ok": True}
 
 
 @router.delete("/{capsule_id}/react")
-async def remove_reaction(
-    capsule_id: UUID,
-    reaction_type: str = Query(..., regex="^(heart|heartbreak|fire|candle)$"),
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+async def unreact(
+    capsule_id: str,
+    reaction_type: str = Query(...),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Remove a reaction."""
-    service = CapsuleService(db)
-    await service.remove_reaction(capsule_id, current_user.id, reaction_type)
+    db = get_supabase()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    db.table("reactions").delete()         .eq("capsule_id", capsule_id)         .eq("user_id", current_user["sub"])         .eq("type", reaction_type).execute()
     return {"ok": True}
