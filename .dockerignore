@@ -1,12 +1,6 @@
 __pycache__
 *.pyc
-*.pyo
 .env
-.env.*
-*.egg-info
 .git
-.gitignore
-README.md
 migrations/
 tests/
-.pytest_cache

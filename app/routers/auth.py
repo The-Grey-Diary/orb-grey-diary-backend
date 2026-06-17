@@ -1,100 +1,107 @@
+"""
+Auth router — Backend-callback OAuth flow.
+Google redirects to THIS backend endpoint directly.
+No more 422 errors from frontend-to-backend code exchange.
+"""
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
-import httpx
 from app.core.config import settings
 from app.core.auth import create_access_token
-from app.core.database import get_supabase
+from app.core.database import get_db
+import httpx
 
 router = APIRouter()
 
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_USER_URL  = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+# The redirect_uri Google calls — points to THIS backend
+GOOGLE_REDIRECT_URI = f"{settings.BACKEND_URL}/auth/google/callback"
 
 
 @router.get("/google")
 async def google_login():
-    """Redirect user to Google OAuth."""
+    """Step 1: Redirect user to Google OAuth page."""
     if not settings.GOOGLE_CLIENT_ID:
-        raise HTTPException(status_code=503, detail="Google OAuth not configured")
-    params = (
-        f"client_id={settings.GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={settings.FRONTEND_URL}/auth/callback"
-        f"&response_type=code"
-        f"&scope=openid email profile"
-        f"&access_type=offline"
-    )
+        raise HTTPException(503, "Google OAuth not configured")
+    params = "&".join([
+        f"client_id={settings.GOOGLE_CLIENT_ID}",
+        f"redirect_uri={GOOGLE_REDIRECT_URI}",
+        "response_type=code",
+        "scope=openid email profile",
+        "access_type=offline",
+        "prompt=select_account",
+    ])
     return RedirectResponse(f"{GOOGLE_AUTH_URL}?{params}")
 
 
-@router.post("/google/callback")
-async def google_callback(code: str):
-    """Exchange Google code for JWT. Called from frontend."""
-    if not settings.GOOGLE_CLIENT_ID:
-        raise HTTPException(status_code=503, detail="Google OAuth not configured")
+@router.get("/google/callback")
+async def google_callback(code: str = None, error: str = None):
+    """Step 2: Google redirects here with the code. Backend exchanges it."""
+    if error:
+        return RedirectResponse(f"{settings.FRONTEND_URL}/?error={error}")
+    if not code:
+        return RedirectResponse(f"{settings.FRONTEND_URL}/?error=no_code")
 
     # Exchange code for tokens
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         token_resp = await client.post(GOOGLE_TOKEN_URL, data={
             "code": code,
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "redirect_uri": f"{settings.FRONTEND_URL}/auth/callback",
+            "redirect_uri": GOOGLE_REDIRECT_URI,
             "grant_type": "authorization_code",
         })
         if token_resp.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to exchange code")
-        tokens = token_resp.json()
+            return RedirectResponse(f"{settings.FRONTEND_URL}/?error=token_exchange_failed")
 
-        # Get user info
+        tokens    = token_resp.json()
         user_resp = await client.get(
-            GOOGLE_USERINFO_URL,
+            GOOGLE_USER_URL,
             headers={"Authorization": f"Bearer {tokens['access_token']}"},
         )
         google_user = user_resp.json()
 
-    db = get_supabase()
+    db = get_db()
     if not db:
-        raise HTTPException(status_code=503, detail="Database not configured")
+        return RedirectResponse(f"{settings.FRONTEND_URL}/?error=db_not_configured")
 
     # Find or create user
-    existing = db.table("users")         .select("*")         .eq("google_id", google_user["sub"])         .execute()
+    try:
+        existing = db.table("users").select("*").eq("google_id", google_user["sub"]).execute()
+        if existing.data:
+            user = existing.data[0]
+        else:
+            result = db.table("users").insert({
+                "email":        google_user.get("email", ""),
+                "google_id":    google_user["sub"],
+                "display_name": google_user.get("name", "Grey Writer"),
+                "avatar_style": "default",
+                "plan":         "free",
+            }).execute()
+            user = result.data[0]
+    except Exception as e:
+        return RedirectResponse(f"{settings.FRONTEND_URL}/?error=db_error")
 
-    if existing.data:
-        user = existing.data[0]
-    else:
-        result = db.table("users").insert({
-            "email": google_user["email"],
-            "google_id": google_user["sub"],
-            "display_name": google_user.get("name", "Grey Writer"),
-            "avatar_style": "default",
-            "plan": "free",
-        }).execute()
-        user = result.data[0]
-
+    # Create JWT and redirect frontend to /auth/success with token
     token = create_access_token({"sub": user["id"], "email": user["email"]})
-    return {"access_token": token, "token_type": "bearer", "user": user}
+    return RedirectResponse(f"{settings.FRONTEND_URL}/auth/success/?token={token}")
 
 
 @router.get("/me")
 async def get_me(request: Request):
-    """Get current user from JWT."""
-    from app.core.auth import get_current_user
-    # Extract token manually since we need Request
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "Not authenticated")
     from app.core.auth import decode_token
-    payload = decode_token(auth_header[7:])
-    db = get_supabase()
+    payload = decode_token(auth[7:])
+    db = get_db()
     if not db:
         return {"id": payload["sub"], "email": payload.get("email", "")}
-    result = db.table("users").select("*").eq("id", payload["sub"]).single().execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="User not found")
-    return result.data
-
+    r = db.table("users").select("*").eq("id", payload["sub"]).single().execute()
+    if not r.data: raise HTTPException(404, "User not found")
+    return r.data
 
 @router.post("/logout")
-async def logout():
-    return {"ok": True}
+async def logout(): return {"ok": True}

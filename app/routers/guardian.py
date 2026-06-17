@@ -1,43 +1,32 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from app.core.auth import get_current_user
-from app.core.database import get_supabase
+from app.core.database import get_db
 
 router = APIRouter()
 
-
 @router.get("/weekly")
-async def get_weekly_chronicle():
-    db = get_supabase()
-    if not db:
-        return {"content": "The Grey Guardian is awakening...", "week_start": None}
-    result = db.table("guardian_reports")         .select("*")         .order("week_start", desc=True)         .limit(1).execute()
-    if result.data:
-        return result.data[0]
-    return {"content": "The first chronicle is being written...", "week_start": None}
-
+async def weekly():
+    db=get_db()
+    if not db: return {"content":"The Grey Guardian is awakening...","week_start":None}
+    r=db.table("guardian_reports").select("*").order("week_start",desc=True).limit(1).execute()
+    return r.data[0] if r.data else {"content":"The first chronicle is being written...","week_start":None}
 
 @router.get("/weekly/archive")
-async def get_guardian_archive(page: int = 1):
-    db = get_supabase()
-    if not db:
-        return {"items": [], "page": page}
-    result = db.table("guardian_reports")         .select("*")         .order("week_start", desc=True)         .range((page-1)*10, page*10-1).execute()
-    return {"items": result.data or [], "page": page}
-
+async def archive(page:int=1):
+    db=get_db()
+    if not db: return {"items":[],"page":page}
+    r=db.table("guardian_reports").select("*").order("week_start",desc=True).range((page-1)*10,page*10-1).execute()
+    return {"items":r.data or [],"page":page}
 
 @router.get("/personal")
-async def get_personal_report(current_user: dict = Depends(get_current_user)):
-    db = get_supabase()
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not configured")
-    result = db.table("personal_reports")         .select("*")         .eq("user_id", current_user["sub"])         .order("generated_at", desc=True)         .limit(1).execute()
-    if result.data:
-        return result.data[0]
-    return {"content": "Your Personal Guardian will speak after you seal more stories.", "capsule_count": 0}
-
+async def personal(user:dict=Depends(get_current_user)):
+    db=get_db()
+    if not db: return {"content":"Your Personal Guardian will speak soon.","capsule_count":0}
+    r=db.table("personal_reports").select("*").eq("user_id",user["sub"]).order("generated_at",desc=True).limit(1).execute()
+    return r.data[0] if r.data else {"content":"Seal more stories before your Guardian can speak.","capsule_count":0}
 
 @router.post("/personal/generate")
-async def generate_personal_report(current_user: dict = Depends(get_current_user)):
+async def gen(user:dict=Depends(get_current_user)):
     from app.services.guardian_service import GuardianService
-    content = await GuardianService.generate_personal_report(current_user["sub"])
-    return {"content": content}
+    content = await GuardianService.generate_personal_report(user["sub"])
+    return {"content":content}
