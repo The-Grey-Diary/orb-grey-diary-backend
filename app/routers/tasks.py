@@ -17,8 +17,30 @@ async def auto_reveal(x_scheduler_secret:str=Header(None)):
     if not db: return {"ok":False}
     try:
         now=datetime.now(IST).isoformat()
-        db.table("capsules").update({"status":"revealed","revealed_at":now}).eq("status","sealed").lte("reveal_date",now).execute()
-        return {"ok":True,"ran_at":now}
+
+        # Fetch eligible capsules individually so we can notify each owner
+        eligible = db.table("capsules").select("id,user_id,title") \
+            .eq("status","sealed").lte("reveal_date",now).execute()
+        rows = eligible.data or []
+
+        for row in rows:
+            db.table("capsules").update({"status":"revealed","revealed_at":now}) \
+                .eq("id", row["id"]).execute()
+            try:
+                user = db.table("users").select("email,display_name") \
+                    .eq("id", row["user_id"]).single().execute()
+                if user.data and user.data.get("email"):
+                    from app.services.notification_service import NotificationService
+                    await NotificationService.send_reveal_notification(
+                        to_email=user.data["email"],
+                        display_name=user.data.get("display_name",""),
+                        capsule_title=row["title"],
+                        frontend_url=settings.FRONTEND_URL,
+                    )
+            except Exception:
+                pass  # never let one failed email break the batch
+
+        return {"ok":True,"ran_at":now,"revealed_count":len(rows)}
     except Exception as e: return {"ok":False,"error":str(e)}
 
 @router.post("/tasks/court-selection")
@@ -48,8 +70,24 @@ async def court_activation(x_scheduler_secret:str=Header(None)):
     if not db: return {"ok":False}
     try:
         today=datetime.now(IST).strftime("%Y-%m-%d")
-        r=db.table("court_sessions").select("id").gte("scheduled_for",f"{today}T22:00:00").lt("scheduled_for",f"{today}T23:59:59").eq("status","pending").execute()
-        if r.data: db.table("court_sessions").update({"status":"active"}).eq("id",r.data[0]["id"]).execute()
+        r=db.table("court_sessions").select("id,capsule_id").gte("scheduled_for",f"{today}T22:00:00").lt("scheduled_for",f"{today}T23:59:59").eq("status","pending").execute()
+        if r.data:
+            session = r.data[0]
+            db.table("court_sessions").update({"status":"active"}).eq("id",session["id"]).execute()
+            try:
+                cap = db.table("capsules").select("title,user_id").eq("id", session["capsule_id"]).single().execute()
+                if cap.data:
+                    user = db.table("users").select("email,display_name").eq("id", cap.data["user_id"]).single().execute()
+                    if user.data and user.data.get("email"):
+                        from app.services.notification_service import NotificationService
+                        await NotificationService.send_court_notification(
+                            to_email=user.data["email"],
+                            display_name=user.data.get("display_name",""),
+                            capsule_title=cap.data["title"],
+                            frontend_url=settings.FRONTEND_URL,
+                        )
+            except Exception:
+                pass
         return {"ok":True}
     except Exception as e: return {"ok":False,"error":str(e)}
 
