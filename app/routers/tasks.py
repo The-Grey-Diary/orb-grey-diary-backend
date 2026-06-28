@@ -99,3 +99,49 @@ async def weekly_guardian(x_scheduler_secret:str=Header(None)):
         report=await GuardianService.generate_weekly_chronicle()
         return {"ok":True}
     except Exception as e: return {"ok":False,"error":str(e)}
+
+
+@router.post("/tasks/reveal-reminders")
+async def reveal_reminders(x_scheduler_secret: str = Header(None)):
+    """Send 'your capsule reveals in 3 days' reminder emails.
+    Run this daily at 9am IST via Cloud Scheduler."""
+    verify(x_scheduler_secret)
+    db = get_db()
+    if not db:
+        return {"ok": False, "reason": "no db"}
+    try:
+        from datetime import timedelta
+        from app.services.notification_service import NotificationService
+
+        now_ist = datetime.now(IST)
+        # Window: capsules that reveal in the next 3 days ± 12 hours
+        window_start = (now_ist + timedelta(days=2, hours=12)).isoformat()
+        window_end   = (now_ist + timedelta(days=3, hours=12)).isoformat()
+
+        upcoming = db.table("capsules") \
+            .select("id,user_id,title,reveal_date") \
+            .eq("status", "sealed") \
+            .gte("reveal_date", window_start) \
+            .lte("reveal_date", window_end) \
+            .execute()
+
+        rows = upcoming.data or []
+        sent = 0
+        for row in rows:
+            try:
+                user = db.table("users").select("email,display_name") \
+                    .eq("id", row["user_id"]).single().execute()
+                if user.data and user.data.get("email"):
+                    await NotificationService.send_reveal_reminder(
+                        to_email=user.data["email"],
+                        display_name=user.data.get("display_name", ""),
+                        capsule_title=row["title"],
+                        frontend_url=settings.FRONTEND_URL,
+                    )
+                    sent += 1
+            except Exception:
+                pass
+
+        return {"ok": True, "reminders_sent": sent, "ran_at": now_ist.isoformat()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

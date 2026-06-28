@@ -66,3 +66,24 @@ class NotificationService:
         </div>
         """
         _send(to_email, subject, html)
+
+    @staticmethod
+    async def send_reveal_reminder(to_email: str, display_name: str, capsule_title: str, frontend_url: str):
+        subject = "Your capsule reveals in 3 days: \u201c" + capsule_title + "\u201d"
+        html = f"""
+        <div style="background:#0B0B0D;padding:40px 20px;font-family:sans-serif;color:#F5F5F5">
+          <div style="max-width:480px;margin:0 auto;background:#141417;border:1px solid rgba(139,124,255,.25);border-radius:16px;padding:32px">
+            <div style="font-size:11px;color:#8B7CFF;letter-spacing:.1em;text-transform:uppercase;margin-bottom:16px">The Grey Diary</div>
+            <h1 style="font-family:Georgia,serif;font-style:italic;font-size:22px;color:#F0F0FA;margin:0 0 14px">3 days until the seal breaks.</h1>
+            <p style="font-size:14px;color:#B0B0C8;line-height:1.7;margin:0 0 8px">Hi {display_name or "there"},</p>
+            <p style="font-size:14px;color:#B0B0C8;line-height:1.7;margin:0 0 24px">
+              Your capsule &ldquo;<em>{capsule_title}</em>&rdquo; reveals in 3 days.
+              The version of you who wrote it is still waiting. Make sure you're there when it opens.
+            </p>
+            <a href="{frontend_url}/home/" style="display:inline-block;background:linear-gradient(135deg,#8B7CFF,#5A4FCC);color:#fff;text-decoration:none;padding:12px 24px;border-radius:10px;font-size:14px">
+              See your vault
+            </a>
+          </div>
+        </div>
+        """
+        _send(to_email, subject, html)

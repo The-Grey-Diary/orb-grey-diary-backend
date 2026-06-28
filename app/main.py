@@ -43,6 +43,7 @@ def _load():
         from app.routers.notifications import router as notif_r
         from app.routers.tasks import router as task_r
         from app.routers.wrapped import router as wrapped_r
+        from app.routers.admin import router as admin_r
         app.include_router(auth_r,  prefix="/auth",          tags=["Auth"])
         app.include_router(users_r, prefix="/users",         tags=["Users"])
         app.include_router(cap_r,   prefix="/capsules",      tags=["Capsules"])
@@ -53,6 +54,7 @@ def _load():
         app.include_router(notif_r, prefix="/notifications", tags=["Notifications"])
         app.include_router(task_r,                           tags=["Tasks"])
         app.include_router(wrapped_r, prefix="/wrapped",     tags=["Wrapped"])
+        app.include_router(admin_r,   prefix="/admin",       tags=["Admin"])
         logger.info("All routers loaded OK")
     except Exception as e:
         logger.error(f"Router load error: {e}")
